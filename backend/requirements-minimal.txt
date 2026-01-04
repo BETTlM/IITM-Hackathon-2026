@@ -1,0 +1,15 @@
+# Minimal requirements - install these first, then upgrade
+fastapi
+uvicorn
+python-dotenv
+pydantic
+langchain
+langchain-community
+langchain-ollama
+langchain-huggingface
+langchain-chroma
+langgraph
+chromadb
+sentence-transformers
+requests
+
