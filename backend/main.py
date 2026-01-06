@@ -26,11 +26,11 @@ def run_ingestion():
         except ImportError:
             from ingest import ingest_data
         
-        print("🔄 Running automatic data ingestion...")
+        print("Running automatic data ingestion...")
         ingest_data()
-        print("✅ Data ingestion completed successfully!")
+        print("Data ingestion completed successfully!")
     except Exception as e:
-        print(f"⚠️  Warning: Data ingestion failed: {e}")
+        print(f"Warning: Data ingestion failed: {e}")
         print("   You can manually run: python ingest_simple.py or python ingest.py")
 
 # Initialize FastAPI
@@ -41,7 +41,6 @@ api = FastAPI(
 )
 
 # CORS middleware - configure allowed origins
-import os
 cors_origins = os.getenv("CORS_ORIGINS", "*")
 if cors_origins != "*":
     # Parse comma-separated origins
@@ -160,12 +159,24 @@ async def get_benefits(request: BenefitRequest):
     7. Compliance Agent - Final validation and disclaimers
     """
     try:
-        # Initialize state
+        # Initialize state with agentic AI fields
         initial_state: AgentState = {
             "card_number": request.card_number,
             "user_context": request.user_context,
             "preferred_language": request.preferred_language,
             "location": request.location,
+            # Agentic AI fields
+            "goal": None,
+            "sub_goals": [],
+            "plan": None,
+            "plan_iteration": 0,
+            "conversation_history": [],
+            "agent_memory": {},
+            "tool_calls": [],
+            "agent_reasoning": {},
+            "next_action": None,
+            "retry_count": {},
+            # Standard fields
             "detected_tier": None,
             "bin_valid": False,
             "retrieved_docs": [],
@@ -226,6 +237,18 @@ def health_check():
             "user_context": None,
             "preferred_language": "en",
             "location": None,
+            # Agentic AI fields
+            "goal": None,
+            "sub_goals": [],
+            "plan": None,
+            "plan_iteration": 0,
+            "conversation_history": [],
+            "agent_memory": {},
+            "tool_calls": [],
+            "agent_reasoning": {},
+            "next_action": None,
+            "retry_count": {},
+            # Standard fields
             "detected_tier": None,
             "bin_valid": False,
             "retrieved_docs": [],
@@ -263,6 +286,6 @@ if __name__ == "__main__":
     import uvicorn
     # Run ingestion on startup
     run_ingestion()
-    print("🚀 Starting FastAPI server on http://0.0.0.0:8000")
+    print("Starting FastAPI server on http://0.0.0.0:8000")
     uvicorn.run(api, host="0.0.0.0", port=8000)
 

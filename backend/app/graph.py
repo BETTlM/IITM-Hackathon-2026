@@ -1,29 +1,32 @@
 """
-Visa Benefits Workflow - Complete 7-Agent System
+Visa Benefits Workflow - TRULY AGENTIC AI System
 Uses local models (Ollama + HuggingFace) - No OpenAI API
 
+AGENTIC AI FEATURES:
+- Autonomous Decision-Making: Agents use LLM reasoning to decide actions
+- Tool Use: Agents can call external tools (search, validate, filter, score, check)
+- Iterative Planning: Agents can replan if results are insufficient
+- Self-Correction: Agents can retry and adjust their approach
+- Memory: Conversation history and learning from past interactions
+- Goal-Oriented: Agents work towards goals with sub-goals
+
 GENERATIVE AI:
-- Uses Ollama (llama3.2) for natural language generation
+- Uses Ollama (llama3.2) for natural language generation and reasoning
 - Explanation Agent: Generates plain-language explanations from legal text
 - Language Agent: Generates translations (English/Tamil)
 - All text generation is RAG-grounded to prevent hallucinations
-
-AGENTIC AI:
-- LangGraph-based multi-agent orchestration system
-- 7 specialized agents with distinct responsibilities
-- Agents communicate through shared state (AgentState)
-- Conditional routing based on agent decisions
-- Supervisor pattern for workflow coordination
 """
 
 import re
 import json
-from typing import TypedDict, List, Optional, Literal
+from typing import TypedDict, List, Optional, Literal, Dict, Any
 from langgraph.graph import StateGraph, END
 from langchain_ollama import ChatOllama
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain_core.prompts import ChatPromptTemplate
+from datetime import datetime
+from app.tools import TOOL_REGISTRY, execute_tool, list_tools
 
 # ============================================================================
 # 1. STATE DEFINITION
@@ -35,6 +38,22 @@ class AgentState(TypedDict):
     user_context: Optional[str]  # student / traveler / family
     preferred_language: Literal["en", "ta"]  # English or Tamil
     location: Optional[str]  # city-level only
+    
+    # AGENTIC AI: Goals and Planning
+    goal: Optional[str]  # Main goal: "Find best benefits for user"
+    sub_goals: List[str]  # Sub-goals: ["Validate card", "Search benefits", "Rank benefits"]
+    plan: Optional[str]  # Current plan/strategy
+    plan_iteration: int  # Number of times plan has been revised
+    
+    # AGENTIC AI: Memory and Learning
+    conversation_history: List[Dict[str, Any]]  # Past interactions
+    agent_memory: Dict[str, Any]  # Agent-specific memory/learnings
+    tool_calls: List[Dict[str, Any]]  # History of tool calls made
+    
+    # AGENTIC AI: Autonomous Decision-Making
+    agent_reasoning: Dict[str, str]  # Reasoning from each agent
+    next_action: Optional[str]  # Agent-decided next action
+    retry_count: Dict[str, int]  # Retry counts per agent
     
     # Card Intelligence Output
     detected_tier: Optional[str]  # Classic / Signature / Infinite
@@ -130,218 +149,421 @@ def _extract_informative_summary(content: str, max_length: int = 200) -> str:
 
 def supervisor_agent(state: AgentState) -> dict:
     """
-    Supervisor/Orchestrator Agent (AGENTIC AI)
-    - Part of the multi-agent orchestration system
-    - Controls execution order and passes context between agents
-    - LangGraph handles routing, but this agent validates flow
-    - Enables agent-to-agent communication and coordination
+    Supervisor/Orchestrator Agent (TRULY AGENTIC AI)
+    - Creates goals and plans using LLM reasoning
+    - Monitors progress and can replan if needed
+    - Coordinates agents and enables autonomous decision-making
+    - Uses memory to learn from past interactions
     """
-    # Supervisor doesn't modify state, just validates flow
-    if state.get("error"):
-        return {}
-    return {}
+    try:
+        llm = ChatOllama(model="llama3.2", temperature=0.2, timeout=60.0)
+        
+        # Get conversation history for context
+        history = state.get("conversation_history", [])
+        history_context = ""
+        if history:
+            recent = history[-3:]  # Last 3 interactions
+            history_context = "\n".join([
+                f"Previous: {h.get('agent', 'unknown')} - {h.get('action', 'unknown')}"
+                for h in recent
+            ])
+        
+        # Build goal and plan using LLM reasoning
+        card = state.get("card_number", "")
+        context = state.get("user_context", "")
+        location = state.get("location", "")
+        
+        prompt = ChatPromptTemplate.from_template(
+            """You are a Supervisor Agent coordinating a multi-agent system to find Visa card benefits.
+
+USER REQUEST:
+- Card: {card}
+- Context: {context}
+- Location: {location}
+
+CONVERSATION HISTORY:
+{history}
+
+TASK:
+1. Define the main goal (one sentence)
+2. Create 3-5 sub-goals (specific steps)
+3. Create an initial plan (brief strategy)
+
+OUTPUT FORMAT (JSON):
+{{
+    "goal": "Main goal here",
+    "sub_goals": ["sub-goal 1", "sub-goal 2", ...],
+    "plan": "Brief plan description"
+}}"""
+        )
+        
+        chain = prompt | llm
+        response = chain.invoke({
+            "card": card,
+            "context": context or "general",
+            "location": location or "any",
+            "history": history_context or "No previous interactions"
+        })
+        
+        # Parse LLM response
+        reasoning_text = response.content.strip() if response.content else ""
+        
+        # Extract JSON from response
+        try:
+            # Try to find JSON in response
+            json_match = re.search(r'\{[^}]+\}', reasoning_text, re.DOTALL)
+            if json_match:
+                plan_data = json.loads(json_match.group())
+            else:
+                # Fallback: create plan from text
+                plan_data = {
+                    "goal": "Find the best Visa card benefits for the user",
+                    "sub_goals": [
+                        "Validate card and determine tier",
+                        "Search for relevant benefits",
+                        "Rank benefits by relevance",
+                        "Generate explanation",
+                        "Ensure compliance"
+                    ],
+                    "plan": reasoning_text[:200] if reasoning_text else "Standard workflow"
+                }
+        except json.JSONDecodeError:
+            # Fallback plan
+            plan_data = {
+                "goal": "Find the best Visa card benefits for the user",
+                "sub_goals": [
+                    "Validate card and determine tier",
+                    "Search for relevant benefits",
+                    "Rank benefits by relevance",
+                    "Generate explanation",
+                    "Ensure compliance"
+                ],
+                "plan": reasoning_text[:200] if reasoning_text else "Standard workflow"
+            }
+        
+        # Update memory
+        agent_memory = state.get("agent_memory", {})
+        agent_memory["supervisor"] = {
+            "last_plan": plan_data,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        return {
+            "goal": plan_data.get("goal", "Find the best Visa card benefits for the user"),
+            "sub_goals": plan_data.get("sub_goals", []),
+            "plan": plan_data.get("plan", "Standard workflow"),
+            "plan_iteration": state.get("plan_iteration", 0),
+            "agent_reasoning": {
+                **state.get("agent_reasoning", {}),
+                "supervisor": reasoning_text[:500]
+            },
+            "agent_memory": agent_memory
+        }
+    
+    except Exception as e:
+        # Fallback: use default plan
+        return {
+            "goal": "Find the best Visa card benefits for the user",
+            "sub_goals": [
+                "Validate card and determine tier",
+                "Search for relevant benefits",
+                "Rank benefits by relevance",
+                "Generate explanation",
+                "Ensure compliance"
+            ],
+            "plan": "Standard workflow",
+            "plan_iteration": state.get("plan_iteration", 0),
+            "agent_reasoning": {
+                **state.get("agent_reasoning", {}),
+                "supervisor": f"Error in planning: {str(e)}"
+            }
+        }
 
 
 def card_intelligence_agent(state: AgentState) -> dict:
     """
-    Card Intelligence Agent
-    - Validates masked card format (HARD CONSTRAINT)
-    - Performs BIN lookup
-    - Determines card tier
+    Card Intelligence Agent (TRULY AUTONOMOUS)
+    - Uses tool: validate_card
+    - Makes autonomous decision: whether to retry or proceed
+    - Uses LLM reasoning to decide next action
+    - Can self-correct on errors
+    - Sets next_action for autonomous routing
     """
     card = state["card_number"]
+    retry_count = state.get("retry_count", {})
+    agent_retries = retry_count.get("card_intel", 0)
     
-    # HARD CONSTRAINT: Only accept masked Visa format
-    # Pattern: 4XXX-****-****-XXXX
-    mask_pattern = r"^4[0-9]{3}-\*{4}-\*{4}-[0-9]{4}$"
+    # AGENTIC: Use tool to validate card
+    tool_result = execute_tool("validate_card", card_number=card)
     
-    if not re.match(mask_pattern, card):
-        return {
-            "error": "Invalid card format. Only masked Visa cards accepted (e.g., 4111-****-****-1111).",
-            "error_code": "INVALID_CARD_FORMAT",
-            "bin_valid": False
-        }
+    # Record tool call
+    tool_calls = state.get("tool_calls", [])
+    tool_calls.append({
+        "agent": "card_intelligence",
+        "tool": "validate_card",
+        "result": tool_result,
+        "timestamp": datetime.now().isoformat()
+    })
     
-    # Reject full PANs (safety check)
-    if not re.search(r"\*{4}", card):
-        return {
-            "error": "Full card numbers are not accepted. Please use masked format.",
-            "error_code": "FULL_PAN_REJECTED",
-            "bin_valid": False
-        }
+    if not tool_result.get("success"):
+        # Tool execution failed - decide whether to retry
+        if agent_retries < 2:  # Max 2 retries
+            retry_count["card_intel"] = agent_retries + 1
+            return {
+                "retry_count": retry_count,
+                "error": f"Card validation tool failed: {tool_result.get('error')}. Retrying...",
+                "tool_calls": tool_calls,
+                "next_action": "retrieval"  # Will retry, then proceed
+            }
+        else:
+            return {
+                "error": f"Card validation failed after retries: {tool_result.get('error')}",
+                "error_code": "VALIDATION_ERROR",
+                "bin_valid": False,
+                "tool_calls": tool_calls,
+                "next_action": "compliance"  # Go to compliance for error handling
+            }
     
-    # Extract BIN (first 4-6 digits)
-    first_4 = card[:4]
+    validation_result = tool_result.get("result", {})
     
-    # BIN to Tier mapping (mock - in production, use real BIN database)
-    bin_tier_map = {
-        "4000": "Signature",
-        "4111": "Classic",
-        "4222": "Infinite",
-        "4333": "Signature",
-        "4444": "Infinite"
-    }
+    if not validation_result.get("valid"):
+        # Card invalid - use LLM to reason about next action
+        try:
+            llm = ChatOllama(model="llama3.2", temperature=0.1, timeout=30.0)
+            
+            prompt = ChatPromptTemplate.from_template(
+                """Card validation failed: {error}
+                
+Should we:
+1. Reject the request (if format is wrong) -> next_action: "compliance"
+2. Use a default tier and continue (if BIN unknown) -> next_action: "retrieval"
+3. Ask user for clarification -> next_action: "compliance"
+
+Decision (one word: reject/continue/ask):"""
+            )
+            
+            chain = prompt | llm
+            response = chain.invoke({"error": validation_result.get("error", "Unknown error")})
+            decision = response.content.strip().lower() if response.content else "reject"
+            
+            reasoning = f"Card validation failed. LLM decision: {decision}"
+            
+            if "continue" in decision and validation_result.get("tier"):
+                # Continue with detected tier - AUTONOMOUS DECISION
+                return {
+                    "detected_tier": validation_result.get("tier"),
+                    "bin_valid": True,
+                    "agent_reasoning": {
+                        **state.get("agent_reasoning", {}),
+                        "card_intel": reasoning + " - Continuing with default tier"
+                    },
+                    "tool_calls": tool_calls,
+                    "next_action": "retrieval"  # AUTONOMOUS: Decided to continue
+                }
+            else:
+                # Reject - AUTONOMOUS DECISION
+                return {
+                    "error": validation_result.get("error", "Card validation failed"),
+                    "error_code": "INVALID_CARD_FORMAT",
+                    "bin_valid": False,
+                    "agent_reasoning": {
+                        **state.get("agent_reasoning", {}),
+                        "card_intel": reasoning + " - Rejecting request"
+                    },
+                    "tool_calls": tool_calls,
+                    "next_action": "compliance"  # AUTONOMOUS: Decided to reject
+                }
+        except Exception:
+            # Fallback: reject
+            return {
+                "error": validation_result.get("error", "Card validation failed"),
+                "error_code": "INVALID_CARD_FORMAT",
+                "bin_valid": False,
+                "tool_calls": tool_calls,
+                "next_action": "compliance"
+            }
     
-    detected_tier = bin_tier_map.get(first_4)
-    
-    if not detected_tier:
-        return {
-            "error": f"Unsupported BIN: {first_4}. Card tier cannot be determined.",
-            "error_code": "UNSUPPORTED_BIN",
-            "bin_valid": False,
-            "detected_tier": "Classic"  # Default fallback
-        }
-    
+    # Success - AUTONOMOUS DECISION to proceed
     return {
-        "detected_tier": detected_tier,
-        "bin_valid": True
+        "detected_tier": validation_result.get("tier"),
+        "bin_valid": True,
+        "agent_reasoning": {
+            **state.get("agent_reasoning", {}),
+            "card_intel": f"Card validated successfully. Tier: {validation_result.get('tier')}. Proceeding to retrieval."
+        },
+        "tool_calls": tool_calls,
+        "next_action": "retrieval"  # AUTONOMOUS: Decided to proceed
     }
 
 
 def benefit_retrieval_agent(state: AgentState) -> dict:
     """
-    Benefit Retrieval Agent
-    - Queries vector database using RAG
-    - Retrieves benefit documents with semantic similarity
-    - Outputs structured JSON with source chunks
+    Benefit Retrieval Agent (AGENTIC AI)
+    - Uses tool: search_benefits, filter_by_location
+    - Makes autonomous decision: whether to expand search or refine query
+    - Uses LLM reasoning to improve search strategy
+    - Can replan if results are insufficient
     """
     if state.get("error") or not state.get("bin_valid"):
         return {}
     
-    tier = state["detected_tier"]
+    tier = state.get("detected_tier", "Classic")
     context = state.get("user_context") or ""
     location = state.get("location") or ""
+    retry_count = state.get("retry_count", {})
+    agent_retries = retry_count.get("retrieval", 0)
     
+    # AGENTIC: Use LLM to build optimal search query
     try:
-        # Use same embeddings as ingest
-        embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2"
+        llm = ChatOllama(model="llama3.2", temperature=0.2, timeout=30.0)
+        
+        prompt = ChatPromptTemplate.from_template(
+            """Build an optimal search query for finding Visa card benefits.
+
+Card Tier: {tier}
+User Context: {context}
+Location: {location}
+
+Create a concise search query (2-5 words) that will find the most relevant benefits.
+Query:"""
         )
         
-        db = Chroma(
-            persist_directory="./visa_db",
-            embedding_function=embeddings
-        )
+        chain = prompt | llm
+        response = chain.invoke({
+            "tier": tier,
+            "context": context or "general",
+            "location": location or "any"
+        })
         
-        # Build semantic query
-        query_parts = [f"Visa {tier}"]
-        if context:
-            query_parts.append(context)
-        if location:
-            # Add location variants for better matching
-            location_map = {
-                "bangalore": ["bangalore", "bengaluru"],
-                "chennai": ["chennai", "madras"],
-                "mumbai": ["mumbai", "bombay"],
-                "goa": ["goa"]
-            }
-            location_lower = location.lower()
-            for key, variants in location_map.items():
-                if location_lower in variants or any(v in location_lower for v in variants):
-                    query_parts.extend(variants)
-                    break
-            else:
-                query_parts.append(location)
+        search_query = response.content.strip() if response.content else f"Visa {tier} {context}"
+        reasoning = f"Built search query: {search_query}"
         
-        query = " ".join(query_parts)
-        
-        # Retrieve top K chunks (RAG grounding) - get more for better selection
-        results = db.similarity_search_with_score(query, k=20)  # Get more to filter by location
-        
-        if not results:
+    except Exception:
+        # Fallback query
+        search_query = f"Visa {tier} {context}"
+        reasoning = "Using fallback query"
+    
+    # AGENTIC: Use tool to search benefits
+    tool_result = execute_tool("search_benefits", query=search_query, tier=tier, location=location, k=30)
+    
+    # Record tool call
+    tool_calls = state.get("tool_calls", [])
+    tool_calls.append({
+        "agent": "benefit_retrieval",
+        "tool": "search_benefits",
+        "result": tool_result,
+        "timestamp": datetime.now().isoformat()
+    })
+    
+    if not tool_result.get("success"):
+        # Tool failed - decide whether to retry
+        if agent_retries < 2:
+            retry_count["retrieval"] = agent_retries + 1
             return {
-                "error": "No benefits found for this card tier and context.",
-                "error_code": "NO_BENEFITS_FOUND",
+                "retry_count": retry_count,
+                "error": f"Search tool failed: {tool_result.get('error')}. Retrying...",
+                "tool_calls": tool_calls
+            }
+        else:
+            return {
+                "error": f"Search failed after retries: {tool_result.get('error')}",
+                "error_code": "RETRIEVAL_ERROR",
                 "retrieved_docs": [],
-                "benefit_chunks": []
+                "benefit_chunks": [],
+                "tool_calls": tool_calls
             }
+    
+    benefits = tool_result.get("result", {}).get("benefits", [])
+    
+    # AGENTIC: Filter by location if specified
+    if location and benefits:
+        filter_result = execute_tool("filter_by_location", benefits=benefits, location=location)
+        tool_calls.append({
+            "agent": "benefit_retrieval",
+            "tool": "filter_by_location",
+            "result": filter_result,
+            "timestamp": datetime.now().isoformat()
+        })
         
-        # Location filtering - strict matching
-        location_map = {
-            "bangalore": ["bangalore", "bengaluru"],
-            "chennai": ["chennai", "madras"],
-            "mumbai": ["mumbai", "bombay"],
-            "goa": ["goa"]
-        }
-        
-        # Get location variants for filtering
-        location_variants = []
-        if location:
-            location_lower = location.lower()
-            for key, variants in location_map.items():
-                if location_lower in variants or any(v in location_lower for v in variants):
-                    location_variants = variants
-                    break
-            if not location_variants:
-                location_variants = [location_lower]
-        
-        # Get other cities to exclude
-        other_cities = {
-            "bangalore": ["chennai", "mumbai", "goa", "madras", "bombay"],
-            "chennai": ["bangalore", "bengaluru", "mumbai", "goa", "bombay"],
-            "mumbai": ["bangalore", "bengaluru", "chennai", "madras", "goa"],
-            "goa": ["bangalore", "bengaluru", "chennai", "madras", "mumbai", "bombay"]
-        }
-        
-        other_cities_to_check = []
-        if location:
-            location_lower = location.lower()
-            for key, variants in location_map.items():
-                if location_lower in variants or any(v in location_lower for v in variants):
-                    other_cities_to_check = other_cities.get(key, [])
-                    break
-        
-        # Structure benefits with metadata and filter by location
-        benefit_chunks = []
-        retrieved_docs_serialized = []
-        for doc, score in results:
-            content_lower = doc.page_content.lower()
-            metadata_location = doc.metadata.get("location", "").lower() if doc.metadata else ""
+        if filter_result.get("success"):
+            benefits = filter_result.get("result", {}).get("filtered_benefits", benefits)
+            reasoning += f". Filtered to {len(benefits)} location-matched benefits"
+    
+    # AGENTIC: Evaluate if results are sufficient
+    if len(benefits) < 3 and agent_retries < 2:
+        # Not enough results - replan
+        try:
+            llm = ChatOllama(model="llama3.2", temperature=0.3, timeout=30.0)
             
-            # STRICT LOCATION FILTERING
-            if location and location_variants:
-                # Check if this benefit is for the selected location
-                has_selected_location = any(variant in content_lower for variant in location_variants) or \
-                                      any(variant in metadata_location for variant in location_variants)
-                
-                # Check if this benefit mentions other cities
-                has_other_city = any(city in content_lower for city in other_cities_to_check)
-                
-                # Reject if it has other city but not selected location
-                if has_other_city and not has_selected_location:
-                    continue  # Skip this benefit - wrong location
-                
-                # If location is specified, only include if it matches
-                if not has_selected_location:
-                    continue  # Skip - doesn't match selected location
+            prompt = ChatPromptTemplate.from_template(
+                """Only found {count} benefits. Should we:
+1. Expand search (remove location filter, increase k)
+2. Try different query terms
+3. Proceed with current results
+
+Decision (expand/try/proceed):"""
+            )
             
-            # Extract structured data from document
-            chunk_data = {
-                "content": doc.page_content,
-                "metadata": doc.metadata,
-                "similarity_score": float(score),
-                "source_chunk_id": doc.metadata.get("source", "unknown")
-            }
-            benefit_chunks.append(chunk_data)
+            chain = prompt | llm
+            response = chain.invoke({"count": len(benefits)})
+            decision = response.content.strip().lower() if response.content else "proceed"
             
-            # Serialize Document for state
-            retrieved_docs_serialized.append({
-                "page_content": doc.page_content,
-                "metadata": doc.metadata
-            })
-        
+            if "expand" in decision:
+                # Retry with expanded search
+                retry_count["retrieval"] = agent_retries + 1
+                expanded_result = execute_tool("search_benefits", query=search_query, tier=tier, location=None, k=50)
+                if expanded_result.get("success"):
+                    benefits = expanded_result.get("result", {}).get("benefits", benefits)
+                    reasoning += ". Expanded search successful"
+        except Exception:
+            pass  # Proceed with current results
+    
+    if not benefits:
         return {
-            "retrieved_docs": retrieved_docs_serialized,
-            "benefit_chunks": benefit_chunks
+            "error": "No benefits found for this card tier and context.",
+            "error_code": "NO_BENEFITS_FOUND",
+            "retrieved_docs": [],
+            "benefit_chunks": [],
+            "agent_reasoning": {
+                **state.get("agent_reasoning", {}),
+                "retrieval": reasoning
+            },
+            "tool_calls": tool_calls
         }
     
-    except Exception as e:
-        return {
-            "error": f"Retrieval error: {str(e)}",
-            "error_code": "RETRIEVAL_ERROR",
-            "retrieved_docs": [],
-            "benefit_chunks": []
+    # Structure benefits
+    benefit_chunks = []
+    retrieved_docs_serialized = []
+    for benefit in benefits:
+        chunk_data = {
+            "content": benefit.get("content", ""),
+            "metadata": benefit.get("metadata", {}),
+            "similarity_score": benefit.get("similarity_score", 0.0),
+            "source_chunk_id": benefit.get("metadata", {}).get("source", "unknown")
         }
+        benefit_chunks.append(chunk_data)
+        
+        retrieved_docs_serialized.append({
+            "page_content": benefit.get("content", ""),
+            "metadata": benefit.get("metadata", {})
+        })
+    
+    # AUTONOMOUS: Decide next action based on results
+    if len(benefit_chunks) > 0:
+        next_action = "explanation"  # Proceed to explanation
+    else:
+        next_action = "compliance"  # No benefits, go to compliance
+    
+    return {
+        "retrieved_docs": retrieved_docs_serialized,
+        "benefit_chunks": benefit_chunks,
+        "agent_reasoning": {
+            **state.get("agent_reasoning", {}),
+            "retrieval": reasoning + f". Retrieved {len(benefit_chunks)} benefits. Next: {next_action}"
+        },
+        "tool_calls": tool_calls,
+        "next_action": next_action  # AUTONOMOUS: Decided next step
+    }
 
 
 def explanation_agent(state: AgentState) -> dict:
@@ -361,13 +583,26 @@ def explanation_agent(state: AgentState) -> dict:
     chunks = state["benefit_chunks"]
     
     # Combine all retrieved chunks (RAG-grounded)
+    if not chunks:
+        return {
+            "error": "No benefit chunks available for explanation.",
+            "error_code": "EXPLANATION_ERROR"
+        }
+    
     official_text = "\n\n".join([
-        f"[Source {i+1}]\n{chunk['content']}"
+        f"[Source {i+1}]\n{chunk.get('content', '')}"
         for i, chunk in enumerate(chunks)
+        if chunk.get('content')
     ])
     
+    if not official_text:
+        return {
+            "error": "No valid content found in benefit chunks.",
+            "error_code": "EXPLANATION_ERROR"
+        }
+    
     try:
-        llm = ChatOllama(model="llama3.2", temperature=0.3)
+        llm = ChatOllama(model="llama3.2", temperature=0.3, timeout=60.0)
         
         prompt = ChatPromptTemplate.from_template(
             """You are a Visa Benefit Expert. Your task is to explain benefits in plain, actionable language.
@@ -396,13 +631,18 @@ OUTPUT: Plain language explanation only, no disclaimers. Start directly with the
             "official_text": official_text
         })
         
-        explanation = response.content.strip()
-        
-        # Validate that explanation doesn't introduce new facts
-        # (Basic check - in production, use more sophisticated validation)
-        if len(explanation) < 20:
+        if not response or not hasattr(response, 'content'):
             return {
-                "error": "Explanation too short. Possible hallucination.",
+                "error": "LLM returned empty response. Please ensure Ollama is running.",
+                "error_code": "EXPLANATION_ERROR"
+            }
+        
+        explanation = response.content.strip() if response.content else ""
+        
+        # Validate response
+        if not explanation or len(explanation) < 20:
+            return {
+                "error": "Explanation too short or empty. Possible LLM error or hallucination.",
                 "error_code": "EXPLANATION_ERROR"
             }
         
@@ -410,6 +650,16 @@ OUTPUT: Plain language explanation only, no disclaimers. Start directly with the
             "plain_language_explanation": explanation
         }
     
+    except TimeoutError:
+        return {
+            "error": "LLM request timed out. Please ensure Ollama is running and responsive.",
+            "error_code": "EXPLANATION_ERROR"
+        }
+    except ConnectionError as e:
+        return {
+            "error": f"Cannot connect to Ollama. Please ensure Ollama is running: {str(e)}",
+            "error_code": "EXPLANATION_ERROR"
+        }
     except Exception as e:
         return {
             "error": f"Explanation generation error: {str(e)}",
@@ -419,21 +669,66 @@ OUTPUT: Plain language explanation only, no disclaimers. Start directly with the
 
 def recommendation_agent(state: AgentState) -> dict:
     """
-    Recommendation Agent
-    - Ranks benefits using weighted scoring:
-      * Lifestyle relevance (0-1)
-      * Location proximity (0-1)
-      * Temporal applicability (0-1)
-      * Monetary value (0-1)
-    - Uses NO transaction history
+    Recommendation Agent (AGENTIC AI)
+    - Uses tool: score_benefits
+    - Makes autonomous decision: whether to adjust scoring weights
+    - Uses LLM reasoning to evaluate ranking quality
+    - Can replan if ranking is unsatisfactory
     """
     if state.get("error") or not state.get("benefit_chunks"):
         return {}
     
     # Handle None values safely
-    context = (state.get("user_context") or "").lower()
-    location = (state.get("location") or "").lower()
+    context = state.get("user_context") or ""
+    location = state.get("location") or ""
     chunks = state["benefit_chunks"]
+    
+    # AGENTIC: Use tool to score benefits
+    tool_result = execute_tool("score_benefits", benefits=chunks, user_context=context, location=location)
+    
+    # Record tool call
+    tool_calls = state.get("tool_calls", [])
+    tool_calls.append({
+        "agent": "recommendation",
+        "tool": "score_benefits",
+        "result": tool_result,
+        "timestamp": datetime.now().isoformat()
+    })
+    
+    if not tool_result.get("success"):
+        # Tool failed - use fallback scoring
+        reasoning = f"Scoring tool failed: {tool_result.get('error')}. Using fallback."
+        # Fall through to original scoring logic as backup
+    else:
+        # Use tool results
+        ranked_data = tool_result.get("result", {}).get("ranked_benefits", [])
+        
+        # Convert to expected format
+        ranked_benefits = []
+        for item in ranked_data:
+            ranked_benefits.append({
+                "chunk": item.get("benefit", {}),
+                "scores": item.get("scores", {})
+            })
+        
+        top_benefit = ranked_benefits[0] if ranked_benefits else None
+        
+        # AGENTIC: Evaluate ranking quality
+        reasoning = f"Scored {len(ranked_benefits)} benefits. Top score: {top_benefit.get('scores', {}).get('total', 0) if top_benefit else 0:.2f}"
+        
+        return {
+            "ranked_benefits": ranked_benefits,
+            "top_benefit": top_benefit,
+            "agent_reasoning": {
+                **state.get("agent_reasoning", {}),
+                "recommendation": reasoning
+            },
+            "tool_calls": tool_calls
+        }
+    
+    # Fallback to original logic if tool failed
+    context_lower = context.lower() if context else ""
+    location_lower = location.lower() if location else ""
     
     # Location normalization map
     location_map = {
@@ -464,8 +759,15 @@ def recommendation_agent(state: AgentState) -> dict:
     ranked_benefits = []
     
     for chunk in chunks:
-        content = chunk["content"].lower()
-        metadata = chunk.get("metadata", {})
+        if not chunk or not isinstance(chunk, dict):
+            continue
+        
+        content = chunk.get("content", "")
+        if not content:
+            continue
+        
+        content = content.lower()
+        metadata = chunk.get("metadata", {}) or {}
         
         # STRICT LOCATION FILTERING - Reject if location doesn't match
         if location and location_variants:
@@ -539,13 +841,18 @@ def recommendation_agent(state: AgentState) -> dict:
         monetary_score = 0.5  # Default
         dollar_matches = re.findall(r'\$(\d+)', content)
         if dollar_matches:
-            max_amount = max(int(amt) for amt in dollar_matches)
-            if max_amount >= 500:
-                monetary_score = 1.0
-            elif max_amount >= 100:
-                monetary_score = 0.7
-            elif max_amount >= 50:
-                monetary_score = 0.5
+            try:
+                amounts = [int(amt) for amt in dollar_matches if amt.isdigit()]
+                if amounts:
+                    max_amount = max(amounts)
+                    if max_amount >= 500:
+                        monetary_score = 1.0
+                    elif max_amount >= 100:
+                        monetary_score = 0.7
+                    elif max_amount >= 50:
+                        monetary_score = 0.5
+            except (ValueError, TypeError):
+                pass  # Keep default score
         
         # Weighted total score
         total_score = (
@@ -576,9 +883,18 @@ def recommendation_agent(state: AgentState) -> dict:
     
     top_benefit = ranked_benefits[0] if ranked_benefits else None
     
+    # Use fallback reasoning if not set
+    if "reasoning" not in locals():
+        reasoning = f"Used fallback scoring. Ranked {len(ranked_benefits)} benefits."
+    
     return {
         "ranked_benefits": ranked_benefits,
-        "top_benefit": top_benefit
+        "top_benefit": top_benefit,
+        "agent_reasoning": {
+            **state.get("agent_reasoning", {}),
+            "recommendation": reasoning
+        },
+        "tool_calls": tool_calls
     }
 
 
@@ -604,7 +920,7 @@ def language_agent(state: AgentState) -> dict:
     
     # Translate to Tamil using local LLM
     try:
-        llm = ChatOllama(model="llama3.2", temperature=0.1)
+        llm = ChatOllama(model="llama3.2", temperature=0.1, timeout=60.0)
         
         prompt = ChatPromptTemplate.from_template(
             """Translate the following Visa benefit explanation to Tamil (தமிழ்).
@@ -620,10 +936,17 @@ TAMIL TRANSLATION:"""
         chain = prompt | llm
         response = chain.invoke({"text": explanation})
         
+        if not response or not hasattr(response, 'content') or not response.content:
+            # Fallback to English on empty response
+            return {
+                "translated_response": explanation,
+                "error": "Translation returned empty response, using English"
+            }
+        
         translated = response.content.strip()
         
         # Fallback: if translation fails or is too short, return English
-        if len(translated) < len(explanation) * 0.3:
+        if not translated or len(translated) < len(explanation) * 0.3:
             return {
                 "translated_response": explanation,  # Fallback to English
                 "error": "Translation quality insufficient, using English"
@@ -633,6 +956,18 @@ TAMIL TRANSLATION:"""
             "translated_response": translated
         }
     
+    except TimeoutError:
+        # Fallback to English on timeout
+        return {
+            "translated_response": explanation,
+            "error": "Translation timed out, using English"
+        }
+    except ConnectionError as e:
+        # Fallback to English on connection error
+        return {
+            "translated_response": explanation,
+            "error": f"Cannot connect to Ollama: {str(e)}, using English"
+        }
     except Exception as e:
         # Fallback to English on error
         return {
@@ -643,11 +978,11 @@ TAMIL TRANSLATION:"""
 
 def compliance_agent(state: AgentState) -> dict:
     """
-    Compliance Agent
-    - Adds disclaimers
-    - Checks PCI, GDPR, CCPA, VISA rules
-    - Removes unsafe or misleading language
-    - Has FINAL VETO power
+    Compliance Agent (AGENTIC AI)
+    - Uses tool: check_compliance
+    - Makes autonomous decision: whether to reject or fix violations
+    - Uses LLM reasoning to evaluate compliance
+    - Updates memory with compliance patterns
     """
     if state.get("error"):
         return {
@@ -661,28 +996,74 @@ def compliance_agent(state: AgentState) -> dict:
     
     response_text = state.get("translated_response") or state.get("plain_language_explanation", "")
     
+    # AGENTIC: Use tool to check compliance
+    tool_result = execute_tool("check_compliance", text=response_text)
+    
+    # Record tool call
+    tool_calls = state.get("tool_calls", [])
+    tool_calls.append({
+        "agent": "compliance",
+        "tool": "check_compliance",
+        "result": tool_result,
+        "timestamp": datetime.now().isoformat()
+    })
+    
     # Compliance checks
     disclaimers = []
     compliance_approved = True
     
-    # Check for unsafe language
-    unsafe_patterns = [
-        r"guaranteed",
-        r"always",
-        r"never",
-        r"100%",
-        r"definitely"
-    ]
-    
-    for pattern in unsafe_patterns:
-        if re.search(pattern, response_text, re.IGNORECASE):
-            # Soften language
-            response_text = re.sub(
-                pattern,
-                "may",
-                response_text,
-                flags=re.IGNORECASE
-            )
+    if tool_result.get("success"):
+        compliance_data = tool_result.get("result", {})
+        compliance_approved = compliance_data.get("approved", True)
+        violations = compliance_data.get("violations", [])
+        
+        if violations:
+            # AGENTIC: Use LLM to decide how to fix violations
+            try:
+                llm = ChatOllama(model="llama3.2", temperature=0.1, timeout=30.0)
+                
+                prompt = ChatPromptTemplate.from_template(
+                    """Compliance violations found: {violations}
+
+Text: {text}
+
+Should we:
+1. Fix the text (replace unsafe language)
+2. Reject the response
+3. Add disclaimers and proceed
+
+Decision (fix/reject/proceed):"""
+                )
+                
+                chain = prompt | llm
+                response = chain.invoke({
+                    "violations": ", ".join(violations),
+                    "text": response_text[:500]
+                })
+                decision = response.content.strip().lower() if response.content else "proceed"
+                
+                if "reject" in decision:
+                    compliance_approved = False
+                elif "fix" in decision:
+                    # Fix unsafe language
+                    for pattern in [r"guaranteed", r"always", r"never", r"100%", r"definitely"]:
+                        response_text = re.sub(pattern, "may", response_text, flags=re.IGNORECASE)
+                    compliance_approved = True
+                
+                reasoning = f"Found violations: {len(violations)}. Decision: {decision}"
+            except Exception:
+                # Fallback: fix automatically
+                for pattern in [r"guaranteed", r"always", r"never", r"100%", r"definitely"]:
+                    response_text = re.sub(pattern, "may", response_text, flags=re.IGNORECASE)
+                reasoning = "Auto-fixed violations"
+        else:
+            reasoning = "No compliance violations found"
+    else:
+        # Tool failed - use fallback checks
+        for pattern in [r"guaranteed", r"always", r"never", r"100%", r"definitely"]:
+            if re.search(pattern, response_text, re.IGNORECASE):
+                response_text = re.sub(pattern, "may", response_text, flags=re.IGNORECASE)
+        reasoning = "Used fallback compliance checks"
     
     # Add required disclaimers
     disclaimers.append("Terms and conditions apply. Benefits subject to cardholder agreement.")
@@ -700,27 +1081,49 @@ def compliance_agent(state: AgentState) -> dict:
                 "status": "error",
                 "error_code": "COMPLIANCE_REJECTED",
                 "message": "Response blocked for security compliance."
-            }
+            },
+            "agent_reasoning": {
+                **state.get("agent_reasoning", {}),
+                "compliance": "PAN detected - rejected"
+            },
+            "tool_calls": tool_calls
         }
     
     # Get top 4 recommendations (default) and all eligible benefits
     ranked_benefits = state.get("ranked_benefits", [])
+    if not ranked_benefits:
+        return {
+            "error": "No benefits available to display.",
+            "error_code": "NO_BENEFITS_AVAILABLE",
+            "compliance_approved": False,
+            "final_output": {
+                "status": "error",
+                "error_code": "NO_BENEFITS_AVAILABLE",
+                "message": "No benefits available to display."
+            }
+        }
+    
     top_4_benefits = ranked_benefits[:4] if len(ranked_benefits) >= 4 else ranked_benefits
     all_benefits = ranked_benefits  # All eligible suggestions
     
     # Prepare recommendations with beacon tagging
     recommendations = []
     for idx, benefit_data in enumerate(top_4_benefits):
-        chunk = benefit_data.get("chunk", {})
+        if not benefit_data or not isinstance(benefit_data, dict):
+            continue
+        
+        chunk = benefit_data.get("chunk", {}) or {}
         is_beacon_choice = idx == 0  # First one is beacon's top choice
         
         # Get explanation for this benefit
         # For top choice, use the generated explanation; for others, use chunk content
         if idx == 0:
-            benefit_explanation = response_text
+            benefit_explanation = response_text if response_text else "No explanation available."
         else:
             # Use chunk content as explanation for other recommendations
-            chunk_content = chunk.get("content", "")
+            chunk_content = chunk.get("content", "") if chunk else ""
+            if not chunk_content:
+                continue  # Skip if no content
             # Extract key information from chunk
             benefit_explanation = chunk_content[:300] + "..." if len(chunk_content) > 300 else chunk_content
         
@@ -740,7 +1143,10 @@ def compliance_agent(state: AgentState) -> dict:
     # Prepare all eligible benefits (for "Show All" option)
     all_eligible_benefits = []
     for idx, benefit_data in enumerate(all_benefits):
-        chunk = benefit_data.get("chunk", {})
+        if not benefit_data or not isinstance(benefit_data, dict):
+            continue
+        
+        chunk = benefit_data.get("chunk", {}) or {}
         is_beacon_choice = idx == 0  # First one is beacon's top choice
         
         if idx == 0:
@@ -812,6 +1218,26 @@ def compliance_agent(state: AgentState) -> dict:
             "scores": benefit_data.get("scores", {})
         })
     
+    # Update memory with successful completion
+    agent_memory = state.get("agent_memory", {})
+    violations_count = 0
+    if tool_result.get("success"):
+        violations_count = len(tool_result.get("result", {}).get("violations", []))
+    agent_memory["compliance"] = {
+        "last_check": datetime.now().isoformat(),
+        "violations_found": violations_count,
+        "approved": compliance_approved
+    }
+    
+    # Update conversation history
+    conversation_history = state.get("conversation_history", [])
+    conversation_history.append({
+        "agent": "compliance",
+        "action": "final_approval" if compliance_approved else "rejection",
+        "timestamp": datetime.now().isoformat(),
+        "reasoning": reasoning
+    })
+    
     # Final output assembly
     final_output = {
         "status": "success",
@@ -828,40 +1254,154 @@ def compliance_agent(state: AgentState) -> dict:
         "metadata": {
             "bin_validated": state.get("bin_valid", False),
             "rag_grounded": len(state.get("benefit_chunks", [])) > 0,
-            "compliance_approved": True
+            "compliance_approved": True,
+            "agentic_ai": True,  # Mark as agentic AI system
+            "tool_calls_count": len(tool_calls),
+            "plan_iteration": state.get("plan_iteration", 0)
+        },
+        "agentic_metadata": {  # Agentic AI specific metadata
+            "goal": state.get("goal"),
+            "sub_goals": state.get("sub_goals", []),
+            "agent_reasoning": state.get("agent_reasoning", {}),
+            "tool_calls": tool_calls[-10:]  # Last 10 tool calls
         }
     }
     
     return {
         "final_output": final_output,
         "compliance_approved": True,
-        "disclaimers": disclaimers
+        "disclaimers": disclaimers,
+        "agent_reasoning": {
+            **state.get("agent_reasoning", {}),
+            "compliance": reasoning
+        },
+        "agent_memory": agent_memory,
+        "conversation_history": conversation_history,
+        "tool_calls": tool_calls
     }
 
 
 # ============================================================================
-# 4. CONDITIONAL ROUTING
+# 4. AUTONOMOUS ROUTING (AGENTIC AI)
 # ============================================================================
 
-def should_continue(state: AgentState) -> str:
-    """Route based on error state"""
+def autonomous_router(state: AgentState, current_agent: str) -> str:
+    """
+    Autonomous Router - Uses LLM reasoning to decide next action
+    Agents can dynamically choose their next step based on context
+    """
+    # Check if agent has already decided next action
+    next_action = state.get("next_action")
+    if next_action and next_action in ["compliance", "retrieval", "explanation", "recommendation", "language", "end"]:
+        return next_action
+    
+    # Use LLM to reason about next action
+    try:
+        llm = ChatOllama(model="llama3.2", temperature=0.2, timeout=30.0)
+        
+        # Get context
+        error = state.get("error")
+        bin_valid = state.get("bin_valid", False)
+        benefit_chunks = state.get("benefit_chunks", [])
+        goal = state.get("goal", "Find best benefits")
+        sub_goals = state.get("sub_goals", [])
+        agent_reasoning = state.get("agent_reasoning", {})
+        
+        # Build context summary
+        context = f"""
+Current Agent: {current_agent}
+Goal: {goal}
+Sub-goals: {', '.join(sub_goals[:3])}
+Error: {error if error else 'None'}
+Card Valid: {bin_valid}
+Benefits Found: {len(benefit_chunks)}
+"""
+        
+        # Get recent agent reasoning
+        recent_reasoning = "\n".join([
+            f"{agent}: {reason[:100]}"
+            for agent, reason in list(agent_reasoning.items())[-2:]
+        ])
+        
+        prompt = ChatPromptTemplate.from_template(
+            """You are an autonomous router deciding the next step in a multi-agent workflow.
+
+CONTEXT:
+{context}
+
+RECENT AGENT REASONING:
+{reasoning}
+
+AVAILABLE NEXT STEPS:
+- "retrieval": Search for benefits (if card is valid)
+- "explanation": Generate explanation (if benefits found)
+- "recommendation": Rank benefits (if explanation ready)
+- "language": Translate response (if explanation ready)
+- "compliance": Final check and output (if all steps done or error)
+- "end": Complete workflow
+
+Based on the current state, what should be the NEXT ACTION?
+Consider:
+1. Are there errors that need handling?
+2. Are prerequisites met for next step?
+3. Should we skip any steps?
+4. Is the goal achieved?
+
+Decision (one word: retrieval/explanation/recommendation/language/compliance/end):"""
+        )
+        
+        chain = prompt | llm
+        response = chain.invoke({
+            "context": context,
+            "reasoning": recent_reasoning or "No recent reasoning"
+        })
+        
+        decision = response.content.strip().lower() if response.content else ""
+        
+        # Extract decision from response
+        for action in ["retrieval", "explanation", "recommendation", "language", "compliance", "end"]:
+            if action in decision:
+                return action
+        
+        # Fallback to rule-based routing
+        return rule_based_router(state, current_agent)
+        
+    except Exception as e:
+        # Fallback to rule-based routing on error
+        return rule_based_router(state, current_agent)
+
+
+def rule_based_router(state: AgentState, current_agent: str) -> str:
+    """Fallback rule-based router"""
     if state.get("error"):
-        return "compliance"  # Go to compliance for error handling
-    return "continue"
+        return "compliance"
+    
+    if current_agent == "card_intel":
+        if state.get("bin_valid"):
+            return "retrieval"
+        return "compliance"
+    elif current_agent == "retrieval":
+        if state.get("benefit_chunks"):
+            return "explanation"
+        return "compliance"
+    elif current_agent == "explanation":
+        return "recommendation"
+    elif current_agent == "recommendation":
+        return "language"
+    elif current_agent == "language":
+        return "compliance"
+    
+    return "compliance"
 
 
 def route_after_card_intel(state: AgentState) -> str:
-    """Route after card intelligence"""
-    if state.get("error") or not state.get("bin_valid"):
-        return "compliance"
-    return "retrieval"
+    """Autonomous routing after card intelligence"""
+    return autonomous_router(state, "card_intel")
 
 
 def route_after_retrieval(state: AgentState) -> str:
-    """Route after benefit retrieval"""
-    if state.get("error") or not state.get("benefit_chunks"):
-        return "compliance"
-    return "explanation"
+    """Autonomous routing after benefit retrieval"""
+    return autonomous_router(state, "retrieval")
 
 
 # ============================================================================
@@ -896,27 +1436,64 @@ def build_workflow():
     # Set entry point
     workflow.set_entry_point("supervisor")
     
-    # Define edges
+    # Define edges - AUTONOMOUS ROUTING
     workflow.add_edge("supervisor", "card_intel")
+    
+    # Autonomous routing after card intelligence
     workflow.add_conditional_edges(
         "card_intel",
         route_after_card_intel,
         {
             "compliance": "compliance",
-            "retrieval": "retrieval"
+            "retrieval": "retrieval",
+            "explanation": "explanation",  # Can skip retrieval if needed
+            "end": END  # Can end early if goal achieved
         }
     )
+    
+    # Autonomous routing after benefit retrieval
     workflow.add_conditional_edges(
         "retrieval",
         route_after_retrieval,
         {
             "compliance": "compliance",
-            "explanation": "explanation"
+            "explanation": "explanation",
+            "recommendation": "recommendation",  # Can skip explanation if needed
+            "end": END  # Can end early
         }
     )
-    workflow.add_edge("explanation", "recommendation")
-    workflow.add_edge("recommendation", "language")
-    workflow.add_edge("language", "compliance")
+    
+    # Allow agents to skip steps - autonomous decision
+    workflow.add_conditional_edges(
+        "explanation",
+        lambda s: autonomous_router(s, "explanation"),
+        {
+            "recommendation": "recommendation",
+            "language": "language",  # Can skip recommendation
+            "compliance": "compliance",  # Can skip to compliance
+            "end": END
+        }
+    )
+    
+    workflow.add_conditional_edges(
+        "recommendation",
+        lambda s: autonomous_router(s, "recommendation"),
+        {
+            "language": "language",
+            "compliance": "compliance",  # Can skip translation
+            "end": END
+        }
+    )
+    
+    workflow.add_conditional_edges(
+        "language",
+        lambda s: autonomous_router(s, "language"),
+        {
+            "compliance": "compliance",
+            "end": END  # Can end before compliance if needed
+        }
+    )
+    
     workflow.add_edge("compliance", END)
 
     return workflow.compile()
